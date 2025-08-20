@@ -49,7 +49,7 @@ if Code.ensure_loaded?(Phoenix.HTML) && Code.ensure_loaded?(Phoenix.HTML.Form) d
       form.source.data.__struct__
     end
 
-    def to_form(%{action: parent_action} = source_changeset, form, field, options) do
+    def to_form(source_changeset, %{action: parent_action} = form, field, options) do
       id = to_string(form.id <> "_#{field}")
       name = to_string(form.name <> "[#{field}]")
 
