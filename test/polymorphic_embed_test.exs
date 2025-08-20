@@ -2502,6 +2502,97 @@ defmodule PolymorphicEmbedTest do
            ]
   end
 
+  test "sort_param should create independent form fields for each new embed" do
+    # This test demonstrates the bug where sort_param creates forms that share data
+    # when dynamically adding new embeds to a form
+
+    reminder_module = get_module(Reminder, :polymorphic)
+
+    # Step 1: Start with a changeset that has one existing embed with filled data
+    changeset_with_one =
+      struct(reminder_module)
+      |> reminder_module.changeset(%{
+        "date" => ~U[2020-05-28 02:57:19Z],
+        "text" => "This is a reminder",
+        "channel" => %{
+          "my_type_field" => "sms",
+          "number" => "02/807.05.53",
+          "country_code" => 1,
+          "provider" => %{
+            "__type__" => "twilio",
+            "api_key" => "foo"
+          }
+        },
+        "contexts" => %{
+          "0" => %{
+            "__type__" => "location",
+            "address" => "first_address"
+          }
+        }
+      })
+
+    # Step 2: Simulate user adding second embed and filling it out
+    changeset_with_two =
+      changeset_with_one.data
+      |> reminder_module.changeset(%{
+        "contexts" => %{
+          "0" => %{
+            "__type__" => "location",
+            "address" => "first_address"
+          },
+          "1" => %{
+            "__type__" => "location",
+            "address" => "second_address"
+          }
+        }
+      })
+
+    # Step 3: Simulate user clicking "Add new" button which adds "2" to sort_param
+    # but doesn't provide actual data for index "2" yet (user hasn't filled it out)
+    attrs_with_new_sort = %{
+      "contexts" => %{
+        "0" => %{
+          "__type__" => "location",
+          "address" => "first_address"
+        },
+        "1" => %{
+          "__type__" => "location",
+          "address" => "second_address"
+        }
+        # Note: no "2" entry here - it will be created by sort_param
+      },
+      # Adding "2" via sort_param
+      "contexts_sort" => ["0", "1", "2"]
+    }
+
+    changeset_with_new =
+      changeset_with_two.data
+      |> reminder_module.changeset(attrs_with_new_sort)
+
+    contexts = changeset_with_new.changes.contexts
+    assert length(contexts) == 3
+
+    first_context = Enum.at(contexts, 0)
+    second_context = Enum.at(contexts, 1)
+    # This one was created by sort_param
+    third_context = Enum.at(contexts, 2)
+
+    # First two should have the addresses we provided
+    assert first_context.__struct__ == PolymorphicEmbed.Reminder.Context.Location
+    assert first_context.address == "first_address"
+
+    assert second_context.__struct__ == PolymorphicEmbed.Reminder.Context.Location
+    assert second_context.address == "second_address"
+
+    # The third context should be a fresh Location context with NO prefilled data
+    # THE BUG: If it has data from the second context, that's the bug
+    assert third_context.data.__struct__ == PolymorphicEmbed.Reminder.Context.Location
+
+    # This should pass - the third context should NOT have prefilled address
+    assert is_nil(third_context.data.address),
+           "Third context should not be prefilled with data from previous contexts"
+  end
+
   describe "polymorphic_embed_inputs_for/1" do
     test "errors in form for polymorphic embed and nested embed" do
       reminder_module = get_module(Reminder, :polymorphic)

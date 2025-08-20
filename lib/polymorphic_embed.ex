@@ -250,7 +250,11 @@ defmodule PolymorphicEmbed do
 
     {sorted, pending} =
       if is_list(sort) do
-        Enum.map_reduce(sort -- drop, value, &Map.pop(&2, &1, create_sort_default.()))
+        Enum.map_reduce(sort -- drop, value, fn key, acc ->
+          # Create a fresh default value for each missing key to avoid sharing the same map
+          default_value = create_sort_default.()
+          Map.pop(acc, key, default_value)
+        end)
       else
         {[], value}
       end
