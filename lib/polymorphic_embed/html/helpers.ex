@@ -113,11 +113,17 @@ if Code.ensure_loaded?(Phoenix.HTML) && Code.ensure_loaded?(Phoenix.HTML.Form) d
       end
     end
 
-    defp prepare_changeset({%Ecto.Changeset{} = changeset, i}, _params, _parent_action) do
+    defp prepare_changeset({%Ecto.Changeset{} = changeset, i}, _params, parent_action) do
       params = changeset.params || %{}
+      changeset = apply_action(changeset, parent_action)
       errors = get_errors(changeset)
 
-      %{changeset: changeset, params: params, errors: errors, index: i}
+      %{
+        changeset: changeset,
+        params: params,
+        errors: errors,
+        index: i
+      }
     end
 
     defp prepare_changeset({data, i}, params, parent_action) do
@@ -132,8 +138,7 @@ if Code.ensure_loaded?(Phoenix.HTML) && Code.ensure_loaded?(Phoenix.HTML.Form) d
 
       changeset = %Ecto.Changeset{
         changeset
-        | action: parent_action,
-          params: params,
+        | params: params,
           errors: errors,
           valid?: errors == []
       }
