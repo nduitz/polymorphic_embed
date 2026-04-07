@@ -2892,6 +2892,33 @@ defmodule PolymorphicEmbedTest do
     end)
   end
 
+  test "polymorphic_embed_inputs_for/4 applies parent action to a prebuilt child changeset" do
+    child_changeset =
+      PolymorphicEmbed.Channel.Email.changeset(
+        %PolymorphicEmbed.Channel.Email{},
+        %{address: "a", valid: true, confirmed: true}
+      )
+
+    changeset =
+      Ecto.Changeset.change(%PolymorphicEmbed.Reminder{})
+      |> Ecto.Changeset.put_change(:channel, child_changeset)
+      |> Map.put(:action, :insert)
+
+    safe_inputs_for(changeset, :channel, :polymorphic, fn f ->
+      assert f.impl == Phoenix.HTML.FormData.Ecto.Changeset
+      assert f.action == :insert
+      assert f.source.action == :insert
+
+      assert f.errors == [
+               {:address,
+                {"should be at least %{count} character(s)",
+                 [count: 3, validation: :length, kind: :min, type: :string]}}
+             ]
+
+      text_input(f, :address)
+    end)
+  end
+
   test "polymorphic_embed_inputs_for/4 for list of embeds" do
     for generator <- @generators do
       reminder_module = get_module(Reminder, generator)
@@ -2968,6 +2995,64 @@ defmodule PolymorphicEmbedTest do
 
       assert contents == String.replace(expected_contents, "\n", "")
     end
+  end
+
+  test "to_form/4 keeps sorted embeds_many params aligned with each row" do
+    reminder_module = get_module(Reminder, :polymorphic)
+
+    attrs = %{
+      "date" => ~U[2020-05-28 02:57:19Z],
+      "text" => "This is a reminder with sorted contexts",
+      "channel" => %{
+        "my_type_field" => "sms",
+        "number" => "02/807.05.53",
+        "country_code" => 1,
+        "provider" => %{
+          "__type__" => "twilio",
+          "api_key" => "foo"
+        }
+      },
+      "contexts" => %{
+        "0" => %{
+          "__type__" => "device",
+          "_persistent_id" => "device-row",
+          "ref" => "12345",
+          "type" => "cellphone"
+        },
+        "1" => %{
+          "__type__" => "age",
+          "_persistent_id" => "age-row",
+          "age" => "aquarius"
+        }
+      },
+      "contexts_sort" => ["1", "0"]
+    }
+
+    changeset =
+      struct(reminder_module)
+      |> reminder_module.changeset(attrs)
+
+    form = Phoenix.Component.to_form(changeset)
+    forms = PolymorphicEmbed.HTML.Helpers.to_form(changeset, form, :contexts, [])
+
+    assert Enum.map(forms, & &1.data.__struct__) == [
+             PolymorphicEmbed.Reminder.Context.Age,
+             PolymorphicEmbed.Reminder.Context.Device
+           ]
+
+    assert Enum.map(forms, & &1.params) == [
+             %{
+               "__type__" => "age",
+               "_persistent_id" => "age-row",
+               "age" => "aquarius"
+             },
+             %{
+               "__type__" => "device",
+               "_persistent_id" => "device-row",
+               "ref" => "12345",
+               "type" => "cellphone"
+             }
+           ]
   end
 
   test "polymorphic_embed_inputs_for/4 after invalid insert" do
