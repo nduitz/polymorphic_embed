@@ -2956,7 +2956,7 @@ defmodule PolymorphicEmbedTest do
         if(polymorphic?(generator),
           do: ~s"""
           <input id="reminder_contexts_0___type__" name="reminder[contexts][0][__type__]" type="hidden" value="device">
-          <input id="reminder_contexts_0_address" name="reminder[contexts][0][address]" type="text">
+          <input id="reminder_contexts_0_address" name="reminder[contexts][0][address]" type="text" value="some address">
           <input id="reminder_contexts_1___type__" name="reminder[contexts][1][__type__]" type="hidden" value="location">
           <input id="reminder_contexts_1_address" name="reminder[contexts][1][address]" type="text" value="some address">
           """,
@@ -2983,7 +2983,7 @@ defmodule PolymorphicEmbedTest do
         if(polymorphic?(generator),
           do: ~s"""
           <input id="reminder_contexts_0___type__" name="reminder[contexts][0][__type__]" type="hidden" value="device">
-          <input id="reminder_contexts_0_address" name="reminder[contexts][0][address]" type="text">
+          <input id="reminder_contexts_0_address" name="reminder[contexts][0][address]" type="text" value="some address">
           <input id="reminder_contexts_1___type__" name="reminder[contexts][1][__type__]" type="hidden" value="location">
           <input id="reminder_contexts_1_address" name="reminder[contexts][1][address]" type="text" value="some address">
           """,

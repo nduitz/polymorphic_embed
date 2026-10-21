@@ -136,19 +136,15 @@ if Code.ensure_loaded?(Phoenix.HTML) && Code.ensure_loaded?(Phoenix.HTML.Form) d
 
       errors = get_errors(changeset)
 
-      changeset = %Ecto.Changeset{
-        changeset
-        | params: params,
-          errors: errors,
-          valid?: errors == []
-      }
+      changeset = %{changeset | params: params}
 
       %{changeset: changeset, params: params, errors: errors, index: i}
     end
 
-    # If the parent changeset had no action, we need to remove the action
-    # from children changeset so we ignore all errors accordingly.
-    defp apply_action(changeset, nil), do: %{changeset | action: nil}
+    defp apply_action(changeset, action) when action in [nil, :ignore],
+      do: %{changeset | action: action}
+
+    defp apply_action(%{action: nil} = changeset, action), do: %{changeset | action: action}
     defp apply_action(changeset, _action), do: changeset
 
     defp get_errors(%{action: nil}), do: []
