@@ -138,8 +138,22 @@ if Code.ensure_loaded?(Phoenix.HTML) && Code.ensure_loaded?(Phoenix.HTML.Form) d
 
       changeset = %{changeset | params: params}
 
+      # The changeset has no changes, so phoenix_ecto would read nested embed
+      # values from the raw form parameters. Drop them to read the cast data.
+      # The changeset keeps them for nested polymorphic forms.
+      params = Map.drop(params, embed_param_keys(changeset.types))
+
       %{changeset: changeset, params: params, errors: errors, index: i}
     end
+
+    defp embed_param_keys(types) do
+      for {field, type} <- types, embed_type?(type), do: to_string(field)
+    end
+
+    defp embed_type?({:embed, _}), do: true
+    defp embed_type?({:parameterized, {PolymorphicEmbed, _}}), do: true
+    defp embed_type?({:array, {:parameterized, {PolymorphicEmbed, _}}}), do: true
+    defp embed_type?(_), do: false
 
     defp apply_action(changeset, action) when action in [nil, :ignore],
       do: %{changeset | action: action}

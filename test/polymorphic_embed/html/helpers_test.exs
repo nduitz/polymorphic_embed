@@ -2,7 +2,8 @@ defmodule PolymorphicEmbed.HTML.HelpersTest do
   use ExUnit.Case, async: true
 
   alias Ecto.Changeset
-  alias PolymorphicEmbed.Channel.Email
+  alias PolymorphicEmbed.Channel.{Email, SMSAttempts, SMSResult, TwilioSMSProvider}
+  alias PolymorphicEmbed.Country
   alias PolymorphicEmbed.HTML.Helpers
   alias PolymorphicEmbed.Reminder
   alias PolymorphicEmbed.Reminder.Context.{Age, Location}
@@ -182,6 +183,55 @@ defmodule PolymorphicEmbed.HTML.HelpersTest do
     [country] = Phoenix.HTML.FormData.to_form(form.source, rebuilt, :country, [])
     assert country.errors == child.changes.country.errors
     assert country.errors != []
+  end
+
+  test "reads nested embeds of valid rows from data instead of parameters" do
+    params = %{
+      "contexts" => %{
+        "0" => %{
+          "__type__" => "location",
+          "address" => "first",
+          "country" => %{"name" => "Belgium"},
+          "_persistent_id" => "first"
+        }
+      }
+    }
+
+    changeset =
+      %Reminder{}
+      |> Changeset.cast(params, [])
+      |> PolymorphicEmbed.cast_polymorphic_embed(:contexts)
+      |> Map.put(:action, :validate)
+
+    [form] = forms(changeset, :contexts)
+    assert form.params["_persistent_id"] == "first"
+    assert form[:address].value == "first"
+    assert %Country{name: "Belgium"} = form[:country].value
+  end
+
+  test "reads nested embeds of a valid single embed from data instead of parameters" do
+    params = %{
+      "channel" => %{
+        "my_type_field" => "sms",
+        "number" => "02/807.05.53",
+        "country_code" => "1",
+        "result" => %{"success" => "true"},
+        "attempts" => %{"0" => %{"date" => "2020-05-28T07:27:05Z"}},
+        "provider" => %{"__type__" => "twilio", "api_key" => "foo"}
+      }
+    }
+
+    changeset =
+      %Reminder{}
+      |> Changeset.cast(params, [])
+      |> PolymorphicEmbed.cast_polymorphic_embed(:channel)
+      |> Map.put(:action, :validate)
+
+    [form] = forms(changeset, :channel)
+    assert form[:number].value == "02/807.05.53"
+    assert %SMSResult{success: true} = form[:result].value
+    assert [%SMSAttempts{}] = form[:attempts].value
+    assert %TwilioSMSProvider{api_key: "foo"} = form[:provider].value
   end
 
   defp forms(changeset, field) do
