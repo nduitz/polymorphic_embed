@@ -12,7 +12,7 @@ defmodule PolymorphicEmbed.EctoParityTest do
 
   alias Ecto.Changeset
 
-  alias __MODULE__.{Author, Post, Profile}
+  alias __MODULE__.{Author, AutoIdPost, Post, Profile}
 
   defmodule Post do
     use Ecto.Schema
@@ -251,7 +251,10 @@ defmodule PolymorphicEmbed.EctoParityTest do
     changeset =
       cast(%Author{}, %{"auto_id_posts" => [post(%{"title" => "hello"})]}, :auto_id_posts)
 
-    assert [%Changeset{changes: %{title: "hello"}}] = changeset.changes.auto_id_posts
+    assert changeset.valid?
+
+    assert [%AutoIdPost{id: nil, title: "hello"}] =
+             Changeset.apply_changes(changeset).auto_id_posts
   end
 
   ## cast embeds many
