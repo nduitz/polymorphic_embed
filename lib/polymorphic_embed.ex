@@ -166,6 +166,17 @@ defmodule PolymorphicEmbed do
           changeset
         end
 
+      {:ok, params_for_field}
+      when array? and not is_list(params_for_field) and not is_map(params_for_field) ->
+        add_invalid_error(changeset, field, array?)
+
+      {:ok, nil} when array? ->
+        add_invalid_error(changeset, field, array?)
+
+      {:ok, params_for_field}
+      when not array? and not is_map(params_for_field) and not is_nil(params_for_field) ->
+        add_invalid_error(changeset, field, array?)
+
       {:ok, nil} when required ->
         Ecto.Changeset.add_error(changeset, field, "can't be blank", validation: :required)
 
@@ -393,7 +404,26 @@ defmodule PolymorphicEmbed do
     end
   end
 
+  defp cast_polymorphic_embeds_many(changeset, field, _changeset_fun, list_params, _field_opts)
+       when not is_list(list_params) do
+    add_invalid_error(changeset, field, true)
+  end
+
   defp cast_polymorphic_embeds_many(changeset, field, changeset_fun, list_params, field_opts) do
+    if Enum.all?(list_params, &is_map/1) do
+      do_cast_polymorphic_embeds_many(changeset, field, changeset_fun, list_params, field_opts)
+    else
+      add_invalid_error(changeset, field, true)
+    end
+  end
+
+  # The same error as Ecto gives for params that are not a map (or a list of maps).
+  defp add_invalid_error(changeset, field, array?) do
+    type = if array?, do: {:array, :map}, else: :map
+    Ecto.Changeset.add_error(changeset, field, "is invalid", validation: :embed, type: type)
+  end
+
+  defp do_cast_polymorphic_embeds_many(changeset, field, changeset_fun, list_params, field_opts) do
     %{
       types_metadata: types_metadata,
       on_type_not_found: on_type_not_found,
