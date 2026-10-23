@@ -50,7 +50,9 @@ if Code.ensure_loaded?(Phoenix.HTML) && Code.ensure_loaded?(Phoenix.HTML.Form) d
     end
 
     # Builds the child forms as phoenix_ecto does for embeds_one and embeds_many.
-    def to_form(%{action: parent_action} = source_changeset, form, field, options) do
+    # As in phoenix_ecto, the parent action comes from the form, because
+    # to_form(changeset, action: :validate) sets it on the form.
+    def to_form(source_changeset, %{action: parent_action} = form, field, options) do
       id = to_string(form.id <> "_#{field}")
       name = to_string(form.name <> "[#{field}]")
 

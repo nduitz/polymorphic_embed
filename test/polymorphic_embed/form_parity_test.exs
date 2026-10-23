@@ -173,6 +173,54 @@ defmodule PolymorphicEmbed.FormParityTest do
     assert_parity(data(:existing, :many), params, :items, :validate)
   end
 
+  # In LiveView, the action is often set on the form with
+  # to_form(changeset, action: :validate), and the changeset has no action.
+  # The child forms then take the action of the form.
+  @validate_params %{
+    item: %{"item" => %{"title" => "", "meta" => %{"note" => "x"}}},
+    items: %{
+      "items" => %{
+        "0" => %{"title" => "", "tags" => %{"0" => %{"name" => ""}}},
+        "1" => %{"title" => "Hello"}
+      }
+    }
+  }
+
+  for {field, cardinality} <- [item: "embeds_one", items: "embeds_many"] do
+    test "#{cardinality}: action :validate on the form" do
+      assert_form_action_parity(unquote(field), :form_source)
+    end
+
+    test "#{cardinality}: action :validate on the form, with the changeset without action" do
+      assert_form_action_parity(unquote(field), :changeset)
+    end
+  end
+
+  defp assert_form_action_parity(field, source) do
+    params = Map.fetch!(@validate_params, field)
+
+    regular = %RegularParent{} |> Changeset.cast(params, []) |> Changeset.cast_embed(field)
+
+    poly =
+      %PolyParent{}
+      |> Changeset.cast(add_type(params, field), [])
+      |> PolymorphicEmbed.cast_polymorphic_embed(field)
+
+    regular_form = Phoenix.Component.to_form(regular, as: "parent", action: :validate)
+    poly_form = Phoenix.Component.to_form(poly, as: "parent", action: :validate)
+
+    {regular_source, poly_source} =
+      case source do
+        :form_source -> {regular_form.source, poly_form.source}
+        :changeset -> {regular, poly}
+      end
+
+    regular_forms = Phoenix.HTML.FormData.to_form(regular_source, regular_form, field, [])
+    poly_forms = Helpers.to_form(poly_source, poly_form, field, [])
+
+    assert diff(snapshot_forms(regular_forms), snapshot_forms(poly_forms), [field]) == []
+  end
+
   ## Helpers
 
   defp data(:existing, :one), do: %{item: existing_item()}

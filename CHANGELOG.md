@@ -44,6 +44,8 @@
       back.
     * A form for an embed that is `nil` uses the changeset function. With a parent
       action, it shows the errors of that changeset.
+    * The child forms take the parent action from the form, as in phoenix_ecto. Before,
+      `PolymorphicEmbed.HTML.Helpers.to_form/4` took it from the changeset argument.
 
 ## 5.0.2
 
