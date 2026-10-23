@@ -34,6 +34,16 @@
   * With `required: true`, an empty list in the data gives "can't be blank", and
     `changeset.required` contains the field.
   * An invalid `:on_replace` option raises `ArgumentError`, not `RuntimeError`.
+  * The forms of `polymorphic_embed_inputs_for` give the same output as `inputs_for`
+    for an Ecto embed:
+    * Each form gets the params of its own row. Before, the first row of a list got
+      the params of all rows, and the other rows got no params.
+    * `form.source` is the child changeset with its action. Before, it was a new
+      changeset with the parent action.
+    * `form.hidden` contains the primary key of the data, so the form sends the id
+      back.
+    * A form for an embed that is `nil` uses the changeset function. With a parent
+      action, it shows the errors of that changeset.
 
 ## 5.0.2
 

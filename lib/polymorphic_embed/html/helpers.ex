@@ -49,60 +49,24 @@ if Code.ensure_loaded?(Phoenix.HTML) && Code.ensure_loaded?(Phoenix.HTML.Form) d
       form.source.data.__struct__
     end
 
+    # Builds the child forms as phoenix_ecto does for embeds_one and embeds_many.
     def to_form(%{action: parent_action} = source_changeset, form, field, options) do
       id = to_string(form.id <> "_#{field}")
       name = to_string(form.name <> "[#{field}]")
 
-      params = Map.get(source_changeset.params || %{}, to_string(field), %{}) |> List.wrap()
+      %schema{} = source_changeset.data
+      field_opts = PolymorphicEmbed.get_field_opts(schema, field)
+      type_field_name = Map.fetch!(field_opts, :type_field_name)
+      # correctly set id and name for embeds_many inputs
+      array? = Map.get(field_opts, :array?, false)
 
-      struct = Ecto.Changeset.apply_changes(source_changeset)
-
-      # The cast keeps the child changesets in the changes. Rows that the cast
-      # replaces or deletes get no form.
-      list_data =
-        case Map.fetch(source_changeset.changes, field) do
-          {:ok, value} when value not in [nil, []] ->
-            value
-            |> List.wrap()
-            |> Enum.reject(
-              &match?(%Ecto.Changeset{action: action} when action in [:replace, :delete], &1)
-            )
-
-          _ ->
-            list_data_from_struct(struct, form, field, options)
-        end
-
-      list_data
+      source_changeset
+      |> child_changesets(form, field, options)
       |> Enum.with_index()
-      |> Enum.map(fn {data, i} ->
-        params = Enum.at(params, i) || %{}
-
-        %Ecto.Changeset{} =
-          changeset =
-          data
-          |> to_changeset()
-          |> apply_action(parent_action)
-
-        errors = get_errors(changeset)
-        data = changeset.data
-
-        changeset = %Ecto.Changeset{
-          changeset
-          | action: parent_action,
-            params: params,
-            errors: errors,
-            valid?: errors == []
-        }
-
-        %schema{} = source_changeset.data
-
-        field_opts = PolymorphicEmbed.get_field_opts(schema, field)
-        type_field_name = Map.fetch!(field_opts, :type_field_name)
-        # correctly set id and name for embeds_many inputs
-        array? = Map.get(field_opts, :array?, false)
-
+      |> Enum.map(fn {changeset, i} ->
+        changeset = changeset |> hide_generated_id() |> apply_action(parent_action)
+        errors = get_errors(changeset, parent_action)
         index_string = Integer.to_string(i)
-
         type = PolymorphicEmbed.get_polymorphic_type(schema, field, changeset.data)
 
         %Phoenix.HTML.Form{
@@ -112,13 +76,37 @@ if Code.ensure_loaded?(Phoenix.HTML) && Code.ensure_loaded?(Phoenix.HTML.Form) d
           name: if(array?, do: name <> "[" <> index_string <> "]", else: name),
           index: if(array?, do: i),
           errors: errors,
-          data: data,
+          data: changeset.data,
           action: parent_action,
-          params: params,
-          hidden: [{type_field_name, to_string(type)}],
+          params: changeset.params || %{},
+          hidden: primary_key_hidden(changeset.data) ++ [{type_field_name, to_string(type)}],
           options: options
         }
       end)
+    end
+
+    # The cast keeps the child changesets in the changes. Rows that the cast
+    # replaces get no form. Without a change, the forms use the data. The
+    # changes can also hold structs, for example after the repo prepared them
+    # or after put_change/3, so they become changesets as the data does.
+    defp child_changesets(source_changeset, form, field, options) do
+      case Map.fetch(source_changeset.changes, field) do
+        {:ok, value} ->
+          on_cast = on_cast(source_changeset, field)
+
+          value
+          |> List.wrap()
+          |> Enum.reject(&match?(%Ecto.Changeset{action: :replace}, &1))
+          |> Enum.map(&to_changeset(&1, on_cast))
+
+        :error ->
+          struct = Ecto.Changeset.apply_changes(source_changeset)
+          on_cast = on_cast(source_changeset, field)
+
+          struct
+          |> list_data_from_struct(form, field, options)
+          |> Enum.map(&to_changeset(&1, on_cast))
+      end
     end
 
     defp list_data_from_struct(struct, form, field, options) do
@@ -133,16 +121,49 @@ if Code.ensure_loaded?(Phoenix.HTML) && Code.ensure_loaded?(Phoenix.HTML.Form) d
       end
     end
 
-    defp to_changeset(%Ecto.Changeset{} = changeset), do: changeset
-    defp to_changeset(data), do: Ecto.Changeset.change(data)
+    # The cast stores its changeset function in the embed type of a changed
+    # field, or in the options of the PolymorphicEmbed type.
+    defp on_cast(changeset, field) do
+      case Map.get(changeset.types, field) do
+        {:embed, %{on_cast: on_cast}} when is_function(on_cast, 2) -> on_cast
+        {:parameterized, {PolymorphicEmbed, %{on_cast: on_cast}}} -> on_cast
+        {:array, {:parameterized, {PolymorphicEmbed, %{on_cast: on_cast}}}} -> on_cast
+        _ -> nil
+      end
+    end
+
+    defp to_changeset(%Ecto.Changeset{} = changeset, _on_cast), do: changeset
+    defp to_changeset(data, nil), do: Ecto.Changeset.change(data)
+    defp to_changeset(data, on_cast), do: on_cast.(data, %{})
+
+    # The cast generates the id of a new child into its data, so that
+    # apply_changes/1 and the repo give the same id. A new Ecto embed has no id
+    # before the insert, so the form of a new child does not show that id.
+    # Only a cast child has a params map. A struct that the caller gives to
+    # put_polymorphic_embed/3 keeps its id in the form.
+    defp hide_generated_id(
+           %Ecto.Changeset{action: :insert, params: %{}, data: %module{} = data} = changeset
+         ) do
+      case module.__schema__(:autogenerate_id) do
+        {key, _source, :binary_id} -> %{changeset | data: Map.put(data, key, nil)}
+        _ -> changeset
+      end
+    end
+
+    defp hide_generated_id(changeset), do: changeset
+
+    # As in phoenix_ecto, the hidden inputs hold the primary key of the data.
+    defp primary_key_hidden(%module{} = data) do
+      for key <- module.__schema__(:primary_key), value = Map.fetch!(data, key), do: {key, value}
+    end
 
     # If the parent changeset had no action, we need to remove the action
     # from children changeset so we ignore all errors accordingly.
     defp apply_action(changeset, nil), do: %{changeset | action: nil}
     defp apply_action(changeset, _action), do: changeset
 
-    defp get_errors(%{action: nil}), do: []
-    defp get_errors(%{action: :ignore}), do: []
-    defp get_errors(%{errors: errors}), do: errors
+    defp get_errors(_changeset, nil), do: []
+    defp get_errors(_changeset, :ignore), do: []
+    defp get_errors(%{errors: errors}, _action), do: errors
   end
 end
