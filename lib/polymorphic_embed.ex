@@ -140,7 +140,9 @@ defmodule PolymorphicEmbed do
 
     changeset
     |> do_cast_polymorphic_embed(field, cast_opts, field_opts, changeset_fun, sort, drop)
+    |> put_embed_type(field, field_opts, &changeset_fun.(&1, &2))
     |> maybe_add_required_error(field, required)
+    |> register_prepare(field)
   end
 
   def cast_polymorphic_embed(_, _, _) do
@@ -173,12 +175,7 @@ defmodule PolymorphicEmbed do
         )
 
       :error ->
-        if data_for_field = Map.fetch!(changeset.data, field) do
-          data_for_field = autogenerate_id(data_for_field, changeset.action)
-          Ecto.Changeset.put_change(changeset, field, data_for_field)
-        else
-          changeset
-        end
+        changeset
 
       {:ok, params_for_field}
       when array? and not is_list(params_for_field) and not is_map(params_for_field) ->
@@ -192,7 +189,7 @@ defmodule PolymorphicEmbed do
         add_invalid_error(changeset, field, array?)
 
       {:ok, nil} ->
-        Ecto.Changeset.put_change(changeset, field, nil)
+        put_nil(changeset, field)
 
       {:ok, map} when map == %{} and not array? ->
         changeset
@@ -344,22 +341,16 @@ defmodule PolymorphicEmbed do
         Ecto.Changeset.add_error(changeset, field, "is invalid")
 
       :type_not_found when on_type_not_found == :nilify ->
-        Ecto.Changeset.put_change(changeset, field, nil)
+        put_nil(changeset, field)
 
       {action, struct} ->
-        embed_changeset = changeset_fun.(struct, params)
-        embed_changeset = %{embed_changeset | action: action}
+        struct = if action == :insert, do: autogenerate_id(struct, :insert), else: struct
+        embed_changeset = %{changeset_fun.(struct, params) | action: action}
 
-        case embed_changeset do
-          %{valid?: true} = embed_changeset ->
-            embed_schema = Ecto.Changeset.apply_changes(embed_changeset)
-            embed_schema = autogenerate_id(embed_schema, embed_changeset.action)
-            Ecto.Changeset.put_change(changeset, field, embed_schema)
-
-          %{valid?: false} = embed_changeset ->
-            changeset
-            |> Ecto.Changeset.put_change(field, embed_changeset)
-            |> Map.put(:valid?, false)
+        if skip?(embed_changeset) do
+          delete_embed_change(changeset, field)
+        else
+          put_embed_change(changeset, field, embed_changeset)
         end
     end
   end
@@ -467,61 +458,252 @@ defmodule PolymorphicEmbed do
 
     list_data_for_field = Map.fetch!(changeset.data, field) || []
 
-    embeds =
-      Enum.map(list_params, fn params ->
+    # With nilify_unlisted_types_on_load or retain_unlisted_types_on_load, the
+    # loaded list can hold nil or plain maps. They match no params, and the
+    # cast drops them without a :replace changeset.
+    structs = Enum.filter(list_data_for_field, &is_struct/1)
+
+    # Each matched row is removed from the remaining data, as in Ecto.
+    {embeds, remaining} =
+      Enum.map_reduce(list_params, structs, fn params, remaining ->
         case get_polymorphic_module_from_map(params, type_field_name, types_metadata) do
           nil when on_type_not_found == :raise ->
             raise_cannot_infer_type_from_data(params)
 
           nil when on_type_not_found == :changeset_error ->
-            :error
+            {:error, remaining}
 
           nil when on_type_not_found == :ignore ->
-            :ignore
+            {:ignore, remaining}
 
           module ->
-            data_for_field =
-              Enum.find(list_data_for_field, &(&1.__struct__ == module and same_pk?(&1, params)))
+            index =
+              Enum.find_index(remaining, &(&1.__struct__ == module and same_pk?(&1, params)))
 
-            embed_changeset =
-              if data_for_field do
-                %{changeset_fun.(data_for_field, params) | action: :update}
-              else
-                %{changeset_fun.(struct(module), params) | action: :insert}
-              end
-
-            maybe_apply_changes(embed_changeset)
+            if index do
+              {data_for_field, remaining} = List.pop_at(remaining, index)
+              {%{changeset_fun.(data_for_field, params) | action: :update}, remaining}
+            else
+              new_struct = module |> struct() |> autogenerate_id(:insert)
+              {%{changeset_fun.(new_struct, params) | action: :insert}, remaining}
+            end
         end
       end)
 
     if Enum.any?(embeds, &(&1 == :error)) do
       Ecto.Changeset.add_error(changeset, field, "is invalid")
     else
-      embeds = Enum.filter(embeds, &(&1 != :ignore))
+      embeds = Enum.reject(embeds, &(&1 == :ignore))
 
-      any_invalid? =
-        Enum.any?(embeds, fn
-          %{valid?: false} -> true
-          _ -> false
-        end)
+      # As in Ecto, rows of the data that the params do not keep are replaced.
+      replaced =
+        remaining
+        |> Enum.map(&%{Ecto.Changeset.change(&1) | action: :replace})
+        |> Enum.reverse()
 
-      changeset = Ecto.Changeset.put_change(changeset, field, embeds)
-
-      if any_invalid? do
-        Map.put(changeset, :valid?, false)
+      if replaced == [] and Enum.all?(embeds, &skip?/1) and
+           Enum.map(embeds, & &1.data) == list_data_for_field do
+        delete_embed_change(changeset, field)
       else
-        changeset
+        put_embed_change(changeset, field, replaced ++ embeds)
       end
     end
   end
 
-  defp maybe_apply_changes(%{valid?: true} = embed_changeset) do
-    embed_changeset
-    |> Ecto.Changeset.apply_changes()
-    |> autogenerate_id(embed_changeset.action)
+  # As in Ecto, an update without changes is not a change.
+  defp skip?(%Changeset{valid?: true, action: :update, changes: changes}), do: changes == %{}
+  defp skip?(_changeset), do: false
+
+  defp put_embed_change(changeset, field, value) do
+    valid? =
+      changeset.valid? and
+        value |> List.wrap() |> Enum.all?(fn embed_changeset -> embed_changeset.valid? end)
+
+    %{changeset | changes: Map.put(changeset.changes, field, value), valid?: valid?}
   end
 
-  defp maybe_apply_changes(%Changeset{valid?: false} = changeset), do: changeset
+  defp delete_embed_change(changeset, field) do
+    %{changeset | changes: Map.delete(changeset.changes, field)}
+  end
+
+  defp put_nil(changeset, field) do
+    if Map.fetch!(changeset.data, field) == nil do
+      delete_embed_change(changeset, field)
+    else
+      %{changeset | changes: Map.put(changeset.changes, field, nil)}
+    end
+  end
+
+  # The field keeps the PolymorphicEmbed type in the schema. When the field has
+  # a change, it gets an embed type in the changeset, so that apply_changes/1,
+  # get_field/2 and traverse_errors/2 handle the child changesets as for an Ecto
+  # embed. Without a change, the field keeps its type, because on insert Ecto
+  # builds changesets for the data of an embed type with one module only. The
+  # type then keeps the on_cast function for the forms.
+  defp put_embed_type(changeset, field, field_opts, on_cast) do
+    if changesets_in_changes?(changeset, field) do
+      put_embed_relation(changeset, field, field_opts, on_cast)
+    else
+      type = changeset.data.__struct__.__schema__(:type, field)
+      %{changeset | types: Map.put(changeset.types, field, put_on_cast(type, on_cast))}
+    end
+  end
+
+  # A struct that put_change/3 set before the cast stays a struct, so the field
+  # keeps its type, as before. Ecto applies the embed type only to changesets.
+  defp changesets_in_changes?(changeset, field) do
+    case Map.fetch(changeset.changes, field) do
+      {:ok, value} -> value |> List.wrap() |> Enum.all?(&match?(%Changeset{}, &1))
+      :error -> false
+    end
+  end
+
+  defp put_on_cast({:array, type}, on_cast), do: {:array, put_on_cast(type, on_cast)}
+
+  defp put_on_cast({:parameterized, {PolymorphicEmbed, opts}}, on_cast),
+    do: {:parameterized, {PolymorphicEmbed, Map.put(opts, :on_cast, on_cast)}}
+
+  defp put_embed_relation(changeset, field, field_opts, on_cast) do
+    %{array?: array?, on_replace: on_replace, types_metadata: [first_type | _]} = field_opts
+
+    related =
+      case List.wrap(Map.get(changeset.changes, field)) do
+        [%Changeset{data: %module{}} | _] -> module
+        _ -> first_type.module
+      end
+
+    embed = %Ecto.Embedded{
+      cardinality: if(array?, do: :many, else: :one),
+      field: field,
+      owner: changeset.data.__struct__,
+      related: related,
+      on_cast: on_cast,
+      on_replace: on_replace
+    }
+
+    %{changeset | types: Map.put(changeset.types, field, {:embed, embed})}
+  end
+
+  # Ecto reads the prepare functions of a changeset before it runs them. A
+  # cast or a put inside a prepare function of the parent therefore prepares
+  # the embeds at once. Ecto sets the repo on the changeset before it runs
+  # the prepare functions. A changeset that the repo returns as an error is
+  # invalid, so it keeps its child changesets.
+  defp register_prepare(%Changeset{repo: repo, valid?: true} = changeset, field)
+       when not is_nil(repo),
+       do: prepare_embeds(changeset, field)
+
+  defp register_prepare(changeset, field),
+    do: Ecto.Changeset.prepare_changes(changeset, &prepare_embeds(&1, field))
+
+  # Runs before the repo inserts or updates the parent. As Ecto does for
+  # embeds, it turns the child changesets into structs and generates the ids.
+  defp prepare_embeds(changeset, field) do
+    case Map.fetch(changeset.changes, field) do
+      {:ok, value} ->
+        value = apply_embed(value, changeset.repo, changeset.action)
+        # The value is a struct now, so the field gets its schema type back.
+        type = changeset.data.__struct__.__schema__(:type, field)
+
+        %{
+          changeset
+          | changes: Map.put(changeset.changes, field, value),
+            types: Map.put(changeset.types, field, type)
+        }
+
+      # Ecto runs the prepare functions of an ordinary embed before it puts its
+      # data into the changes. So data without a change can still need ids.
+      :error ->
+        data = Map.fetch!(changeset.data, field)
+
+        case autogenerate_id(data, :insert) do
+          ^data -> changeset
+          data -> put_in(changeset.changes[field], data)
+        end
+    end
+  end
+
+  defp apply_embed(list, repo, repo_action) when is_list(list) do
+    list |> Enum.map(&apply_embed(&1, repo, repo_action)) |> Enum.reject(&is_nil/1)
+  end
+
+  defp apply_embed(%Changeset{action: action}, _repo, _repo_action)
+       when action in [:replace, :delete],
+       do: nil
+
+  defp apply_embed(%Changeset{data: %module{}} = embed_changeset, repo, repo_action) do
+    # As in Ecto, a child update of a parent insert is an insert, so that the
+    # ordinary embeds of the child also get their ids.
+    action = if repo_action == :insert, do: :insert, else: embed_changeset.action
+
+    embed_changeset =
+      embed_changeset.prepare
+      |> Enum.reverse()
+      |> Enum.reduce(%{embed_changeset | repo: repo}, fn prepare, acc -> prepare.(acc) end)
+
+    # As in Ecto, a prepare function cannot make a child invalid.
+    unless embed_changeset.valid? do
+      raise ArgumentError,
+            "changeset for embedded #{inspect(module)} is invalid, " <>
+              "but the parent changeset was not marked as invalid"
+    end
+
+    # As in Ecto, on insert the data of the child goes into its changes, so
+    # that embeds in the data are prepared too.
+    embed_changeset =
+      PolymorphicEmbed.Embedded.maybe_surface_changes(
+        embed_changeset,
+        embed_changeset.data,
+        module,
+        action
+      )
+
+    # The ordinary Ecto embeds of the child get the same preparation as the
+    # embeds of the parent: their prepare functions run and their ids are
+    # generated. This also prepares polymorphic fields inside them.
+    embeds =
+      PolymorphicEmbed.Embedded.prepare(
+        embed_changeset,
+        module.__schema__(:embeds),
+        repo.__adapter__(),
+        action
+      )
+
+    changes =
+      embed_changeset.changes
+      |> Map.merge(embeds)
+      |> prepare_polymorphic_changes(module, repo, action)
+
+    embed_changeset.data
+    |> struct(changes)
+    |> autogenerate_id(action)
+  end
+
+  # On insert, a struct gets the same preparation as a new child changeset,
+  # so that the embeds in its data get ids too.
+  defp apply_embed(%_{} = struct, repo, :insert),
+    do: apply_embed(%{Ecto.Changeset.change(struct) | action: :insert}, repo, :insert)
+
+  defp apply_embed(%_{} = struct, _repo, _repo_action), do: autogenerate_id(struct, :insert)
+
+  defp apply_embed(value, _repo, _repo_action), do: value
+
+  # The polymorphic fields of a child can hold structs or changesets that no
+  # cast prepared, for example from put_polymorphic_embed/3.
+  defp prepare_polymorphic_changes(changes, module, repo, action) do
+    Map.new(changes, fn {field, value} ->
+      case module.__schema__(:type, field) do
+        {:parameterized, {PolymorphicEmbed, _}} ->
+          {field, apply_embed(value, repo, action)}
+
+        {:array, {:parameterized, {PolymorphicEmbed, _}}} ->
+          {field, apply_embed(value, repo, action)}
+
+        _ ->
+          {field, value}
+      end
+    end)
+  end
 
   @impl true
   def cast(_data, _params),
@@ -579,7 +761,10 @@ defmodule PolymorphicEmbed do
   end
 
   def dump(%Ecto.Changeset{valid?: true} = changeset, dumper, params) do
-    dump(Ecto.Changeset.apply_changes(changeset), dumper, params)
+    changeset
+    |> Ecto.Changeset.apply_changes()
+    |> autogenerate_id(changeset.action)
+    |> dump(dumper, params)
   end
 
   def dump(%module{} = struct, dumper, %{
@@ -833,6 +1018,9 @@ defmodule PolymorphicEmbed do
   defp autogenerate_id([schema | rest], action) do
     [autogenerate_id(schema, action) | autogenerate_id(rest, action)]
   end
+
+  # nil, and plain maps that the load options keep, have no id to generate.
+  defp autogenerate_id(value, _action) when not is_struct(value), do: value
 
   defp autogenerate_id(schema, :update) do
     # in case there is no primary key, Ecto.primary_key/1 returns an empty keyword list []

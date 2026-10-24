@@ -57,15 +57,19 @@ if Code.ensure_loaded?(Phoenix.HTML) && Code.ensure_loaded?(Phoenix.HTML.Form) d
 
       struct = Ecto.Changeset.apply_changes(source_changeset)
 
+      # The cast keeps the child changesets in the changes. Rows that the cast
+      # replaces or deletes get no form.
       list_data =
-        case Map.get(struct, field) do
-          nil ->
-            type = Keyword.get(options, :polymorphic_type, get_polymorphic_type(form, field))
-            module = PolymorphicEmbed.get_polymorphic_module(struct.__struct__, field, type)
-            if module, do: [struct(module)], else: []
+        case Map.fetch(source_changeset.changes, field) do
+          {:ok, value} when value not in [nil, []] ->
+            value
+            |> List.wrap()
+            |> Enum.reject(
+              &match?(%Ecto.Changeset{action: action} when action in [:replace, :delete], &1)
+            )
 
-          data ->
-            List.wrap(data)
+          _ ->
+            list_data_from_struct(struct, form, field, options)
         end
 
       list_data
@@ -76,10 +80,11 @@ if Code.ensure_loaded?(Phoenix.HTML) && Code.ensure_loaded?(Phoenix.HTML.Form) d
         %Ecto.Changeset{} =
           changeset =
           data
-          |> Ecto.Changeset.change()
+          |> to_changeset()
           |> apply_action(parent_action)
 
         errors = get_errors(changeset)
+        data = changeset.data
 
         changeset = %Ecto.Changeset{
           changeset
@@ -115,6 +120,21 @@ if Code.ensure_loaded?(Phoenix.HTML) && Code.ensure_loaded?(Phoenix.HTML.Form) d
         }
       end)
     end
+
+    defp list_data_from_struct(struct, form, field, options) do
+      case Map.get(struct, field) do
+        nil ->
+          type = Keyword.get(options, :polymorphic_type, get_polymorphic_type(form, field))
+          module = PolymorphicEmbed.get_polymorphic_module(struct.__struct__, field, type)
+          if module, do: [struct(module)], else: []
+
+        data ->
+          List.wrap(data)
+      end
+    end
+
+    defp to_changeset(%Ecto.Changeset{} = changeset), do: changeset
+    defp to_changeset(data), do: Ecto.Changeset.change(data)
 
     # If the parent changeset had no action, we need to remove the action
     # from children changeset so we ignore all errors accordingly.

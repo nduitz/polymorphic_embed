@@ -1934,19 +1934,11 @@ defmodule PolymorphicEmbedTest do
 
       changeset = reminder_module.changeset(struct, %{})
 
-      if polymorphic?(generator) do
-        assert changeset.changes.channel.id
-      else
-        assert map_size(changeset.changes) == 0
-      end
+      assert map_size(changeset.changes) == 0
 
       struct = Repo.insert!(changeset)
 
-      if polymorphic?(generator) do
-        assert changeset.changes.channel.id == struct.channel.id
-      else
-        assert struct.channel.id
-      end
+      assert struct.channel.id
     end
   end
 
@@ -1976,19 +1968,11 @@ defmodule PolymorphicEmbedTest do
           }
         )
 
-      if polymorphic?(generator) do
-        assert changeset.changes.channel.id
-      else
-        refute Map.has_key?(changeset.changes.channel, :id)
-      end
+      refute Map.has_key?(changeset.changes.channel, :id)
 
       struct = Repo.insert!(changeset)
 
-      if polymorphic?(generator) do
-        assert changeset.changes.channel.id == struct.channel.id
-      else
-        assert struct.channel.id
-      end
+      assert struct.channel.id
     end
   end
 
@@ -2009,22 +1993,12 @@ defmodule PolymorphicEmbedTest do
 
       changeset = reminder_module.changeset(struct, %{})
 
-      if polymorphic?(generator) do
-        assert Enum.at(changeset.changes.contexts, 0).id
-        assert Enum.at(changeset.changes.contexts, 1).id
-      else
-        assert map_size(changeset.changes) == 0
-      end
+      assert map_size(changeset.changes) == 0
 
       struct = Repo.insert!(changeset)
 
-      if polymorphic?(generator) do
-        assert Enum.at(changeset.changes.contexts, 0).id == Enum.at(struct.contexts, 0).id
-        assert Enum.at(changeset.changes.contexts, 1).id == Enum.at(struct.contexts, 1).id
-      else
-        assert Enum.at(struct.contexts, 0).id
-        assert Enum.at(struct.contexts, 1).id
-      end
+      assert Enum.at(struct.contexts, 0).id
+      assert Enum.at(struct.contexts, 1).id
     end
   end
 
@@ -2049,22 +2023,12 @@ defmodule PolymorphicEmbedTest do
           }
         )
 
-      if polymorphic?(generator) do
-        assert Enum.at(changeset.changes.contexts, 0).id
-        assert Enum.at(changeset.changes.contexts, 1).id
-      else
-        refute Map.has_key?(Enum.at(changeset.changes.contexts, 0), :id)
-      end
+      refute Map.has_key?(Enum.at(changeset.changes.contexts, 0), :id)
 
       struct = Repo.insert!(changeset)
 
-      if polymorphic?(generator) do
-        assert Enum.at(changeset.changes.contexts, 0).id == Enum.at(struct.contexts, 0).id
-        assert Enum.at(changeset.changes.contexts, 1).id == Enum.at(struct.contexts, 1).id
-      else
-        assert Enum.at(struct.contexts, 0).id
-        assert Enum.at(struct.contexts, 1).id
-      end
+      assert Enum.at(struct.contexts, 0).id
+      assert Enum.at(struct.contexts, 1).id
     end
   end
 
@@ -2198,12 +2162,19 @@ defmodule PolymorphicEmbedTest do
           |> reminder_module.changeset(attrs)
           |> Repo.insert()
 
+        # The device in the data has no id, so the params cannot match it. As in
+        # Ecto, the cast replaces it and inserts a new device.
         assert {:error,
                 %Ecto.Changeset{
                   valid?: false,
                   action: :insert,
                   errors: errors,
-                  changes: %{contexts: [%{errors: device_errors, action: :insert} | _]}
+                  changes: %{
+                    contexts: [
+                      %{action: :replace},
+                      %{errors: device_errors, action: :insert} | _
+                    ]
+                  }
                 }} = insert_result
 
         assert [] = errors

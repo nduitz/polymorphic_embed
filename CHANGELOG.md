@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+  `cast_polymorphic_embed/3` now gives the same output as `Ecto.Changeset.cast_embed/3`
+  for the same input.
+
+  **Breaking changes**:
+
+  * `changeset.changes` keeps each child as an `Ecto.Changeset`, as for an Ecto embed.
+    Before, a valid child was a struct. `get_change/2` gives changesets now.
+    `apply_changes/1`, `apply_action/2` and `get_field/2` still give structs.
+  * `Ecto.Changeset.merge/2` takes the types of the second changeset. Put the changeset of
+    `cast_polymorphic_embed/3` second, for example `merge(change(parent), changeset)`.
+    Else `get_field/2` and `apply_changes/1` give the child changesets.
+  * The repo runs the `prepare_changes/2` functions of the children, as for Ecto embeds.
+    Before, the cast lost them. If such a function makes a child invalid, the insert or
+    update raises `ArgumentError`, as in Ecto.
+  * Ordinary Ecto embeds inside a polymorphic embed get ids and timestamps when the
+    repo inserts or updates the parent, as Ecto embeds do. Before, their ids stayed
+    `nil`.
+  * A list of embeds gets a changeset with action `:replace` for each row of the data
+    that the params do not keep. Before, the row was removed from the list.
+  * A list of embeds matches the rows of the data by primary key. Before, no row
+    matched params with string keys, so each row got a new id and lost the data that
+    the params did not set.
+  * When the params do not contain the field, the cast does not put the data into
+    `changes`.
+  * A child that is valid, has action `:update` and has no changes is not a change.
+  * When the cast puts changesets into the changes of the field, `changeset.types` has an
+    `:embed` type for it. For example, `validate_required/3` on the field then shows the
+    same warning as for an Ecto embed.
+  * `nil` for a list of embeds gives the error "is invalid". Before, the cast ignored it.
+  * With `required: true`, an empty list in the data gives "can't be blank", and
+    `changeset.required` contains the field.
+  * An invalid `:on_replace` option raises `ArgumentError`, not `RuntimeError`.
+
 ## 5.0.2
 
   * Remove warning when aliases cannot be expanded (#123).
