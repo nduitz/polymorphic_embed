@@ -18,6 +18,12 @@ defmodule PolymorphicEmbed.ReviewRegressionTest do
 
     def changeset(struct, params), do: Changeset.cast(struct, params, [:name])
 
+    def required_changeset(struct, params) do
+      struct
+      |> Changeset.cast(params, [:name])
+      |> Changeset.validate_required([:name])
+    end
+
     def failing_prepare_changeset(struct, params) do
       struct
       |> changeset(params)
@@ -253,6 +259,176 @@ defmodule PolymorphicEmbed.ReviewRegressionTest do
       |> PolymorphicEmbed.cast_polymorphic_embed(:channel, required: true)
 
     assert changeset.valid?
+  end
+
+  describe "put_polymorphic_embed/3" do
+    # After the cast, Ecto.Changeset.put_change/3 and update_change/3 accept
+    # only one schema module for the field, as for an Ecto embed.
+    test "edits a list of more than one type" do
+      params = %{
+        "contexts" => [%{"__type__" => "a", "name" => "a"}, %{"__type__" => "b", "name" => "b"}]
+      }
+
+      changeset = cast(%Parent{}, params, [:contexts])
+
+      assert_raise ArgumentError, ~r/expected changeset data to be a/, fn ->
+        Changeset.update_change(changeset, :contexts, & &1)
+      end
+
+      same =
+        PolymorphicEmbed.put_polymorphic_embed(
+          changeset,
+          :contexts,
+          Changeset.get_change(changeset, :contexts)
+        )
+
+      assert [%A{name: "a"}, %B{name: "b"}] = Changeset.apply_changes(same).contexts
+
+      structs =
+        PolymorphicEmbed.put_polymorphic_embed(changeset, :contexts, [
+          %A{name: "x"},
+          %B{name: "y"}
+        ])
+
+      assert [%A{name: "x"}, %B{name: "y"}] = Changeset.apply_changes(structs).contexts
+
+      maps =
+        PolymorphicEmbed.put_polymorphic_embed(changeset, :contexts, [
+          %{__type__: "b", name: "m"},
+          [__type__: "a", name: "n"]
+        ])
+
+      assert [%B{name: "m"}, %A{name: "n"}] = Changeset.apply_changes(maps).contexts
+
+      inserted = Repo.insert!(maps)
+      assert [%B{name: "m", id: b_id}, %A{name: "n", id: a_id}] = inserted.contexts
+      assert b_id && a_id
+    end
+
+    test "updates, keeps and replaces rows of the data by module and primary key" do
+      parent = %Parent{contexts: [%A{id: "a1", name: "a"}, %B{id: "b1", name: "b"}]}
+      changeset = Changeset.change(parent)
+
+      assert PolymorphicEmbed.put_polymorphic_embed(changeset, :contexts, parent.contexts).changes ==
+               %{}
+
+      changeset =
+        PolymorphicEmbed.put_polymorphic_embed(changeset, :contexts, [
+          %{id: "b1", name: "new b"},
+          %A{name: "new a"}
+        ])
+
+      assert [
+               %{action: :replace, data: %A{id: "a1"}},
+               %{action: :update, data: %B{id: "b1"}, changes: %{name: "new b"}},
+               %{action: :insert, data: %A{id: new_id}}
+             ] = changeset.changes.contexts
+
+      assert new_id
+
+      assert [%B{id: "b1", name: "new b"}, %A{name: "new a"}] =
+               Changeset.apply_changes(changeset).contexts
+    end
+
+    test "generates ids of ordinary embeds in the data of a child" do
+      changeset =
+        %Parent{}
+        |> cast(%{}, [])
+        |> PolymorphicEmbed.put_polymorphic_embed(:channel, %Wrapper{holder: %Holder{name: "h"}})
+
+      inserted = Repo.insert!(changeset)
+
+      assert %Wrapper{id: wrapper_id, holder: %Holder{name: "h", id: holder_id}} =
+               inserted.channel
+
+      assert wrapper_id
+      assert holder_id
+    end
+
+    test "replaces data that holds only entries from the load options with an empty list" do
+      parent = %Parent{contexts2: [%{"__type__" => "old", "name" => "old"}]}
+
+      changeset = PolymorphicEmbed.put_polymorphic_embed(Changeset.change(parent), :contexts2, [])
+
+      assert Map.has_key?(changeset.changes, :contexts2)
+      assert [] = Changeset.apply_changes(changeset).contexts2
+    end
+
+    test "keeps the with: function of the cast for the forms" do
+      parent = %Parent{channel: %A{id: "a1", name: nil}}
+
+      changeset =
+        parent
+        |> Changeset.cast(@parent_params, [:date, :text])
+        |> PolymorphicEmbed.cast_polymorphic_embed(:channel,
+          with: [a: &A.required_changeset/2]
+        )
+        |> PolymorphicEmbed.put_polymorphic_embed(:channel, parent.channel)
+
+      refute Map.has_key?(changeset.changes, :channel)
+
+      form = Phoenix.Component.to_form(changeset, action: :validate)
+      [child_form] = Helpers.to_form(form.source, form, :channel, [])
+      assert child_form.errors == [name: {"can't be blank", [validation: :required]}]
+    end
+
+    test "keeps the id of a new child that the caller gives in the form" do
+      id = Ecto.UUID.generate()
+
+      changeset =
+        %Parent{}
+        |> cast(%{}, [])
+        |> PolymorphicEmbed.put_polymorphic_embed(:channel, %A{id: id, name: "a"})
+
+      form = Phoenix.Component.to_form(changeset)
+      [child_form] = Helpers.to_form(changeset, form, :channel, [])
+
+      assert child_form.data.id == id
+      assert {:id, id} in child_form.hidden
+    end
+
+    test "prepares a put that a prepare function of the parent runs" do
+      changeset =
+        %Parent{}
+        |> Changeset.cast(@parent_params, [:date, :text])
+        |> Changeset.prepare_changes(
+          &PolymorphicEmbed.put_polymorphic_embed(&1, :channel, %A{name: "a"})
+        )
+
+      inserted = Repo.insert!(changeset)
+      assert %A{name: "a", id: id} = inserted.channel
+      assert id
+    end
+
+    test "gives an error and keeps the data for nil as a list of embeds" do
+      parent = %Parent{contexts: [%A{id: "a1", name: "a"}]}
+      changeset = PolymorphicEmbed.put_polymorphic_embed(Changeset.change(parent), :contexts, nil)
+
+      refute changeset.valid?
+      refute Map.has_key?(changeset.changes, :contexts)
+      assert changeset.errors == [contexts: {"is invalid", [type: {:array, :map}]}]
+    end
+
+    test "gives an error for a single embed that is not a map" do
+      changeset =
+        PolymorphicEmbed.put_polymorphic_embed(Changeset.change(%Parent{}), :channel, "a")
+
+      refute changeset.valid?
+      assert changeset.errors == [channel: {"is invalid", [type: :map]}]
+    end
+
+    test "changes the type of a single embed" do
+      changeset =
+        %Parent{}
+        |> cast(%{"channel" => %{"__type__" => "a", "name" => "a"}}, [:channel])
+        |> PolymorphicEmbed.put_polymorphic_embed(:channel, %B{name: "b"})
+
+      assert %{action: :insert, data: %B{}} = changeset.changes.channel
+      assert %B{name: "b"} = Changeset.apply_changes(changeset).channel
+
+      changeset = PolymorphicEmbed.put_polymorphic_embed(changeset, :channel, nil)
+      refute Map.has_key?(changeset.changes, :channel)
+    end
   end
 
   test "generates the id of an ordinary embed in a polymorphic child that the insert updates" do

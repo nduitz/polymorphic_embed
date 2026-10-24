@@ -149,6 +149,200 @@ defmodule PolymorphicEmbed do
     raise "cast_polymorphic_embed/3 only accepts a changeset as first argument"
   end
 
+  @doc """
+  Puts an embed or a list of embeds into a polymorphic field, as
+  `Ecto.Changeset.put_embed/4` does for an Ecto embed.
+
+  After `cast_polymorphic_embed/3` puts a change, the field has an Ecto embed
+  type with one schema module. `Ecto.Changeset.put_change/3`,
+  `Ecto.Changeset.update_change/3` and `Ecto.Changeset.change/2` then accept
+  only children of that module. This function accepts children of all the
+  types of the field.
+
+  The value can be a struct, a changeset, a map or a keyword list, or a list of
+  them for a list of embeds. The type of a map or a keyword list comes from its
+  type field. Without a type field, the type is the type of the data with the
+  same primary key, or the only type of the field.
+  """
+  def put_polymorphic_embed(%Ecto.Changeset{} = changeset, field, value) do
+    field_opts = get_field_opts(changeset.data.__struct__, field)
+
+    if valid_put_value?(value, field_opts.array?) do
+      do_put_polymorphic_embed(changeset, field, value, field_opts)
+    else
+      # The same error as Ecto.Changeset.put_embed/4 gives. The data and the
+      # changes stay as they are.
+      type = if field_opts.array?, do: {:array, :map}, else: :map
+      error = {field, {"is invalid", [type: type]}}
+      %{changeset | errors: [error | changeset.errors], valid?: false}
+    end
+  end
+
+  defp valid_put_value?(list, true = _array?) when is_list(list),
+    do: Enum.all?(list, &valid_put_value?(&1, false))
+
+  defp valid_put_value?(_value, true = _array?), do: false
+  defp valid_put_value?(nil, false = _array?), do: true
+  defp valid_put_value?(map, false = _array?) when is_map(map), do: true
+  defp valid_put_value?(list, false = _array?) when is_list(list), do: Keyword.keyword?(list)
+  defp valid_put_value?(_value, false = _array?), do: false
+
+  defp do_put_polymorphic_embed(changeset, field, value, field_opts) do
+    original = Map.fetch!(changeset.data, field)
+
+    result =
+      if field_opts.array?,
+        do: put_embeds_many(value, original || [], field_opts),
+        else: put_embeds_one(value, original, field_opts)
+
+    changeset =
+      case result do
+        :ignore -> delete_embed_change(changeset, field)
+        {:ok, change} -> put_embed_change(changeset, field, change)
+      end
+
+    # The forms keep the changeset function of an earlier cast, for example a
+    # with: function.
+    on_cast =
+      stored_on_cast(changeset, field) ||
+        (&changeset_fun(&1, &2, nil, field_opts.types_metadata))
+
+    changeset
+    |> put_embed_type(field, field_opts, on_cast)
+    |> register_prepare(field)
+  end
+
+  defp stored_on_cast(changeset, field) do
+    case Map.get(changeset.types, field) do
+      {:embed, %{on_cast: on_cast}} when is_function(on_cast, 2) -> on_cast
+      {:parameterized, {PolymorphicEmbed, %{on_cast: on_cast}}} -> on_cast
+      {:array, {:parameterized, {PolymorphicEmbed, %{on_cast: on_cast}}}} -> on_cast
+      _ -> nil
+    end
+  end
+
+  defp put_embeds_one(nil, nil, _field_opts), do: :ignore
+  defp put_embeds_one(nil, _original, _field_opts), do: {:ok, nil}
+
+  # As in Ecto with on_replace: :update, a map or a keyword list updates the
+  # data of the same type. A struct or a changeset updates the data only when
+  # the primary keys match. Else the value replaces the data.
+  defp put_embeds_one(value, original, field_opts) do
+    module = put_module(value, List.wrap(original), field_opts)
+    attrs? = not is_struct(value)
+
+    current =
+      if is_struct(original) and original.__struct__ == module and
+           (attrs? or put_pk_match?(value, original)),
+         do: original
+
+    embed_changeset = put_changeset(value, current, module, field_opts)
+
+    cond do
+      embed_changeset.action == :ignore -> :ignore
+      current && skip?(embed_changeset) -> :ignore
+      true -> {:ok, embed_changeset}
+    end
+  end
+
+  # As in Ecto, each value updates the data row with the same module and
+  # primary key. Rows of the data that the value does not keep are replaced.
+  defp put_embeds_many(values, original, field_opts) do
+    structs = Enum.filter(original, &is_struct/1)
+
+    {embeds, remaining} =
+      values
+      |> List.wrap()
+      |> Enum.map_reduce(structs, fn value, remaining ->
+        module = put_module(value, remaining, field_opts)
+
+        index =
+          Enum.find_index(remaining, &(&1.__struct__ == module and put_pk_match?(value, &1)))
+
+        {current, remaining} =
+          if index, do: List.pop_at(remaining, index), else: {nil, remaining}
+
+        {{put_changeset(value, current, module, field_opts), current}, remaining}
+      end)
+
+    embeds = Enum.reject(embeds, fn {embed_changeset, _} -> embed_changeset.action == :ignore end)
+
+    # As in Ecto, the list is not a change when each value updates its data row
+    # without changes, in the order of the data.
+    if remaining == [] and Enum.map(embeds, &elem(&1, 1)) == original and
+         Enum.all?(embeds, fn {embed_changeset, _} -> skip?(embed_changeset) end) do
+      :ignore
+    else
+      replaced =
+        remaining
+        |> Enum.map(&%{Ecto.Changeset.change(&1) | action: :replace})
+        |> Enum.reverse()
+
+      {:ok, replaced ++ Enum.map(embeds, &elem(&1, 0))}
+    end
+  end
+
+  defp put_changeset(%Changeset{} = embed_changeset, current, _module, _field_opts),
+    do: put_new_action(embed_changeset, current)
+
+  defp put_changeset(%_{} = struct, current, _module, _field_opts),
+    do: struct |> Ecto.Changeset.change() |> put_new_action(current)
+
+  defp put_changeset(attrs, current, module, field_opts) do
+    attrs =
+      attrs
+      |> Map.new()
+      |> Map.drop([field_opts.type_field_name, to_string(field_opts.type_field_name)])
+
+    (current || struct(module))
+    |> Ecto.Changeset.change(attrs)
+    |> put_new_action(current)
+  end
+
+  # A new child gets its id at once, as in the cast.
+  defp put_new_action(%Changeset{action: nil} = embed_changeset, nil),
+    do: %{embed_changeset | action: :insert, data: autogenerate_id(embed_changeset.data, :insert)}
+
+  defp put_new_action(%Changeset{action: nil} = embed_changeset, _current),
+    do: %{embed_changeset | action: :update}
+
+  defp put_new_action(embed_changeset, _current), do: embed_changeset
+
+  defp put_module(%Changeset{data: %module{}}, _data, _field_opts), do: module
+  defp put_module(%module{}, _data, _field_opts), do: module
+
+  defp put_module(attrs, data, field_opts) do
+    %{types_metadata: types_metadata, type_field_name: type_field_name} = field_opts
+    attrs = Map.new(attrs)
+
+    cond do
+      module = get_polymorphic_module_from_map(attrs, type_field_name, types_metadata) ->
+        module
+
+      current = Enum.find(data, &put_pk_match?(attrs, &1)) ->
+        current.__struct__
+
+      match?([_], types_metadata) ->
+        hd(types_metadata).module
+
+      true ->
+        raise_cannot_infer_type_from_data(attrs)
+    end
+  end
+
+  # As in Ecto, the primary key values of the value are compared as they are.
+  # The data row must have a primary key.
+  defp put_pk_match?(value, %module{} = current) do
+    pks = module.__schema__(:primary_key)
+
+    pks != [] and
+      Enum.map(pks, &put_pk_value(value, &1)) == Enum.map(pks, &Map.get(current, &1))
+  end
+
+  defp put_pk_value(%Changeset{data: data}, pk), do: Map.get(data, pk)
+  defp put_pk_value(%_{} = struct, pk), do: Map.get(struct, pk)
+  defp put_pk_value(attrs, pk), do: Attrs.get(Map.new(attrs), pk)
+
   defp do_cast_polymorphic_embed(
          changeset,
          field,

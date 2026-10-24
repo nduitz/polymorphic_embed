@@ -5,6 +5,12 @@
   `cast_polymorphic_embed/3` now gives the same output as `Ecto.Changeset.cast_embed/3`
   for the same input.
 
+  **Features**:
+
+  * Add `PolymorphicEmbed.put_polymorphic_embed/3`. It works as
+    `Ecto.Changeset.put_embed/4`, and it accepts children of all the types of the
+    field, also in one list.
+
   **Breaking changes**:
 
   * `changeset.changes` keeps each child as an `Ecto.Changeset`, as for an Ecto embed.
@@ -30,6 +36,10 @@
   * When the cast puts changesets into the changes of the field, `changeset.types` has an
     `:embed` type for it. For example, `validate_required/3` on the field then shows the
     same warning as for an Ecto embed.
+  * After the cast puts changesets into the changes of the field,
+    `Ecto.Changeset.put_change/3`, `update_change/3` and `change/2` accept only one
+    schema module for the field, as for an Ecto embed. Before, they accepted all types.
+    Use `PolymorphicEmbed.put_polymorphic_embed/3` for children of other types.
   * `nil` for a list of embeds gives the error "is invalid". Before, the cast ignored it.
   * With `required: true`, an empty list in the data gives "can't be blank", and
     `changeset.required` contains the field.
